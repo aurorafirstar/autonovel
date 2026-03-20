@@ -3,8 +3,8 @@
 import re
 import os
 
-CHAPTERS_DIR = "/home/jeffq/autonovel/chapters"
-OUT_DIR = "/home/jeffq/autonovel/typeset"
+CHAPTERS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "chapters")
+OUT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 def latex_escape(t):
     t = t.replace('&', '\\&')

@@ -35,9 +35,10 @@ from dotenv import load_dotenv
 BASE_DIR = Path(__file__).parent
 load_dotenv(BASE_DIR / ".env", override=True)
 
-FAL_KEY = os.environ.get("FAL_KEY", "")
-FAL_URL = "https://fal.run/fal-ai/nano-banana-2"
-FAL_EDIT_URL = "https://fal.run/fal-ai/nano-banana-2/edit"
+OPENROUTER_KEY = os.environ.get("OPENROUTER_API_KEY", "")
+OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+NANO_BANANA_MODEL = "google/gemini-3-pro-image-preview"
+# Edit via same model with image input
 
 ART_DIR = BASE_DIR / "art"
 VARIANTS_DIR = ART_DIR / "variants"
@@ -55,59 +56,80 @@ ANTHROPIC_BASE = os.environ.get("AUTONOVEL_API_BASE_URL", "https://api.anthropic
 # ============================================================
 
 def fal_generate(prompt, resolution="1K", aspect_ratio="auto", seed=None):
-    import httpx
-    payload = {
-        "prompt": prompt,
-        "num_images": 1,
-        "resolution": resolution,
-        "aspect_ratio": aspect_ratio,
-        "output_format": "png",
-        "safety_tolerance": "6",
-        "limit_generations": True,
-        "thinking_level": "high",
-    }
-    if seed is not None:
-        payload["seed"] = seed
+    """Generate image via OpenRouter Nano Banana Pro."""
+    import httpx, base64, tempfile
     resp = httpx.post(
-        FAL_URL,
-        headers={"Authorization": f"Key {FAL_KEY}", "Content-Type": "application/json"},
-        json=payload, timeout=300,
+        OPENROUTER_URL,
+        headers={"Authorization": f"Bearer {OPENROUTER_KEY}", "Content-Type": "application/json"},
+        json={
+            "model": NANO_BANANA_MODEL,
+            "messages": [{"role": "user", "content": prompt + f" Aspect ratio: {aspect_ratio}."}],
+            "max_tokens": 4096,
+        },
+        timeout=300,
     )
     resp.raise_for_status()
     data = resp.json()
-    return data["images"][0]["url"], data.get("description", "")
+    # Extract image from response
+    images = data.get("choices", [{}])[0].get("message", {}).get("images", [])
+    if images:
+        img_url = images[0].get("image_url", {}).get("url", "")
+        if img_url.startswith("data:"):
+            # Save data URL to temp file and return path
+            b64 = img_url.split(",", 1)[1]
+            tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+            tmp.write(base64.b64decode(b64))
+            tmp.close()
+            return f"file://{tmp.name}", ""
+        return img_url, ""
+    raise RuntimeError("No image in OpenRouter response")
 
 
 def fal_edit(prompt, image_urls, resolution="1K", aspect_ratio="1:1", seed=None):
-    import httpx
-    payload = {
-        "prompt": prompt,
-        "image_urls": image_urls,
-        "num_images": 1,
-        "resolution": resolution,
-        "aspect_ratio": aspect_ratio,
-        "output_format": "png",
-        "safety_tolerance": "6",
-        "limit_generations": True,
-        "thinking_level": "high",
-    }
-    if seed is not None:
-        payload["seed"] = seed
+    """Edit image via OpenRouter Nano Banana Pro with image input."""
+    import httpx, base64, tempfile
+    content = [{"type": "text", "text": prompt + f" Aspect ratio: {aspect_ratio}."}]
+    for url in image_urls:
+        if url.startswith("file://"):
+            import pathlib
+            b64 = base64.b64encode(pathlib.Path(url[7:]).read_bytes()).decode()
+            content.append({"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}})
+        else:
+            content.append({"type": "image_url", "image_url": {"url": url}})
     resp = httpx.post(
-        FAL_EDIT_URL,
-        headers={"Authorization": f"Key {FAL_KEY}", "Content-Type": "application/json"},
-        json=payload, timeout=300,
+        OPENROUTER_URL,
+        headers={"Authorization": f"Bearer {OPENROUTER_KEY}", "Content-Type": "application/json"},
+        json={
+            "model": NANO_BANANA_MODEL,
+            "messages": [{"role": "user", "content": content}],
+            "max_tokens": 4096,
+        },
+        timeout=300,
     )
     resp.raise_for_status()
     data = resp.json()
-    return data["images"][0]["url"], data.get("description", "")
+    images = data.get("choices", [{}])[0].get("message", {}).get("images", [])
+    if images:
+        img_url = images[0].get("image_url", {}).get("url", "")
+        if img_url.startswith("data:"):
+            b64 = img_url.split(",", 1)[1]
+            tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+            tmp.write(base64.b64decode(b64))
+            tmp.close()
+            return f"file://{tmp.name}", ""
+        return img_url, ""
+    raise RuntimeError("No image in OpenRouter response")
 
 
 def download_image(url, dest_path):
-    import httpx
+    import httpx, shutil
+    dest_path.parent.mkdir(parents=True, exist_ok=True)
+    if url.startswith("file://"):
+        src = url[7:]
+        shutil.copy2(src, str(dest_path))
+        return dest_path.stat().st_size
     resp = httpx.get(url, timeout=60, follow_redirects=True)
     resp.raise_for_status()
-    dest_path.parent.mkdir(parents=True, exist_ok=True)
     dest_path.write_bytes(resp.content)
     return len(resp.content)
 
@@ -573,8 +595,8 @@ def main():
         parser.print_help()
         return
 
-    if not FAL_KEY and args.command not in ("vectorize",):
-        print("ERROR: FAL_KEY not set in .env", file=sys.stderr)
+    if not OPENROUTER_KEY and args.command not in ("vectorize",):
+        print("ERROR: OPENROUTER_API_KEY not set in .env", file=sys.stderr)
         sys.exit(1)
 
     ART_DIR.mkdir(exist_ok=True)
